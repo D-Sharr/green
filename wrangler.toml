@@ -1,0 +1,9 @@
+name = "green"
+main = "src/index.ts"
+compatibility_date = "2024-04-05"
+
+# Bind your D1 Database here
+[[d1_databases]]
+binding = "DB" # Access this in Hono via env.DB
+database_name = "green-db" # Define your database name
+database_id = "b6134838-d899-4cf5-956d-7c599b2c26fd" # Replace with the actual ID from `npx wrangler d1 create vpanel-db`
