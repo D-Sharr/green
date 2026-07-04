@@ -546,6 +546,130 @@ Content-Type: application/json
 
 ---
 
+## Admin API — WARP
+
+Manages Cloudflare WARP (WireGuard) configs bound to devices.
+
+### `GET /api/dev/warp`
+
+List all WARP configs joined with device info.
+
+**Response:** `200 OK`
+```json
+[
+  {
+    "hwid": "abc123",
+    "endpoint": "162.159.193.8:2408",
+    "remark": "Local Anycast",
+    "auto_mode": 0,
+    "status": "active",
+    "warp_uri": "wireguard://...",
+    "device_info_os": "Android",
+    "user_type": "free",
+    "event_name": "Free Trial"
+  }
+]
+```
+
+### `GET /api/dev/warp/settings`
+
+Get global WARP settings.
+
+**Response:** `200 OK`
+```json
+{ "id": 1, "auto_connect": 0, "endpoint": "162.159.193.8:500", "remark": "Local Anycast" }
+```
+
+### `PUT /api/dev/warp/settings`
+
+Update global WARP settings. **Also propagates** the new `endpoint` and `remark` to all existing `warp_configs`, rebuilding their `warp_uri` in-place (keys preserved, no external calls).
+
+**Request Body:**
+```json
+{
+  "auto_connect": 1,
+  "endpoint": "162.159.193.8:500",
+  "remark": "Local Anycast"
+}
+```
+
+**Response:** `200 OK`
+```json
+{ "message": "Settings updated", "propagated": 5 }
+```
+
+### `POST /api/dev/warp/generate`
+
+Generate a new WARP config for a device (calls external Vercel function to register with Cloudflare).
+
+**Request Body:**
+```json
+{ "hwid": "abc123" }
+```
+
+**Response:** `201 Created`
+```json
+{ "message": "WARP config generated", "uri": "wireguard://..." }
+```
+
+### `POST /api/dev/warp/regenerate/:hwid`
+
+Regenerate WARP config for a device (re-registers with Cloudflare, replaces keys).
+
+**Response:** `200 OK`
+```json
+{ "message": "WARP config regenerated", "uri": "wireguard://..." }
+```
+
+### `PUT /api/dev/warp/:hwid`
+
+Edit a WARP config's structured fields. The `warp_uri` is automatically rebuilt from the provided fields. Only provided fields are updated; omitted fields retain their current values.
+
+**Request Body:**
+```json
+{
+  "endpoint": "162.159.193.8:500",
+  "remark": "New Remark",
+  "mtu": 1280,
+  "address_v4": "172.16.0.2/32",
+  "address_v6": "2606:4700:110:8a18::/128",
+  "reserved": "1, 2, 3",
+  "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+  "private_key": "base64key...",
+  "status": "active"
+}
+```
+
+**Response:** `200 OK`
+```json
+{ "message": "WARP config updated", "uri": "wireguard://..." }
+```
+
+### `PATCH /api/dev/warp/:hwid`
+
+Toggle per-device auto mode.
+
+**Request Body:**
+```json
+{ "auto_mode": true }
+```
+
+**Response:** `200 OK`
+```json
+{ "message": "Auto mode updated" }
+```
+
+### `DELETE /api/dev/warp/:hwid`
+
+Delete a WARP config.
+
+**Response:** `200 OK`
+```json
+{ "message": "WARP config deleted" }
+```
+
+---
+
 ## Announcement Keys Reference
 
 | Key             | Trigger Condition                                          |
@@ -612,3 +736,30 @@ Content-Type: application/json
 |---------|------|-------------------------|
 | key     | TEXT | Announcement key (PK)   |
 | message | TEXT | Message text             |
+
+### `warp_configs`
+| Column       | Type     | Description                          |
+|--------------|----------|--------------------------------------|
+| hwid         | TEXT     | Hardware ID (PK, FK → devices)       |
+| config_id    | TEXT     | Cloudflare config ID                 |
+| private_key  | TEXT     | WireGuard private key (base64)       |
+| public_key   | TEXT     | Peer public key (base64)             |
+| endpoint     | TEXT     | WireGuard endpoint (host:port)       |
+| address_v4   | TEXT     | IPv4 address with CIDR               |
+| address_v6   | TEXT     | IPv6 address with CIDR (nullable)    |
+| reserved     | TEXT     | Reserved bytes (e.g. "1, 2, 3")      |
+| mtu          | INTEGER  | MTU (default 1280)                   |
+| remark       | TEXT     | Config remark (URI fragment)         |
+| warp_uri     | TEXT     | Full wireguard:// URI (auto-built)   |
+| auto_mode    | INTEGER  | Per-device auto mode (0/1)           |
+| status       | TEXT     | `active` or `error`                  |
+| created_at   | DATETIME | Auto-set on creation                 |
+| updated_at   | DATETIME | Auto-set on update                   |
+
+### `warp_settings`
+| Column       | Type    | Description                              |
+|--------------|---------|------------------------------------------|
+| id           | INTEGER | Always 1 (singleton)                     |
+| auto_connect | INTEGER | Auto-generate WARP for new devices (0/1) |
+| endpoint     | TEXT    | Default endpoint for new configs         |
+| remark       | TEXT    | Default remark for new configs           |

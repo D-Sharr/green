@@ -1,0 +1,6 @@
+{
+  "rewrites": [
+    { "source": "/api/warp/register", "destination": "/api/warp/register" },
+    { "source": "/", "destination": "/api/index" }
+  ]
+}

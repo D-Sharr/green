@@ -32,6 +32,9 @@ lerna-debug.log*
 # misc
 .DS_Store
 
+# db backups (contain sensitive server data)
+database_backup_*.sql
+
 .dev.vars*
 !.dev.vars.example
 !.env.example

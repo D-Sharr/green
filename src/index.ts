@@ -10,6 +10,8 @@ export type Bindings = {
   ADMIN_TOKEN: string;
   EVENT_SECRET: string;
   EXTERNAL_API_TOKEN: string;
+  VERCEL_WARP_URL: string;
+  VERCEL_WARP_TOKEN: string;
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -502,6 +504,302 @@ app.delete("/api/dev/devices/:hwid", async (c) => {
 
 
 // ==========================================
+// WARP CONFIGS CRUD
+// ==========================================
+
+async function callVercelWarp(env: Bindings, endpoint?: string, remark?: string): Promise<any> {
+  const url = env.VERCEL_WARP_URL;
+  const token = env.VERCEL_WARP_TOKEN;
+  if (!url || !token) {
+    throw new Error("Vercel WARP function not configured (missing VERCEL_WARP_URL or VERCEL_WARP_TOKEN)");
+  }
+
+  const body: Record<string, string> = {};
+  if (endpoint) body.endpoint = endpoint;
+  if (remark) body.remark = remark;
+
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text();
+    throw new Error(`Vercel WARP error ${resp.status}: ${errText}`);
+  }
+
+  return resp.json();
+}
+
+function buildWarpUri(fields: {
+  private_key: string; public_key: string; endpoint: string;
+  address_v4: string; address_v6: string; reserved: string;
+  mtu: number; remark: string;
+}): string {
+  const encPriv = encodeURIComponent(fields.private_key);
+  const encPub = encodeURIComponent(fields.public_key);
+  const reservedParts = (fields.reserved || "").split(", ");
+  const reservedStr = reservedParts.join("%2C%20");
+  const encV4 = encodeURIComponent(fields.address_v4);
+  const encV6 = fields.address_v6 ? encodeURIComponent(fields.address_v6) : "";
+  const addressParam = encV6 ? `${encV4}%2C%20${encV6}` : encV4;
+  return `wireguard://${encPriv}@${fields.endpoint}?publickey=${encPub}&presharedkey=&reserved=${reservedStr}&address=${addressParam}&mtu=${fields.mtu}#${fields.remark || ""}`;
+}
+
+// Get all warp configs (joined with device info)
+app.get("/api/dev/warp", async (c) => {
+  try {
+    const { results } = await c.env.DB.prepare(`
+      SELECT wc.*, d.device_info_os, d.user_type,
+             (SELECT name FROM events WHERE events.id = d.current_event_id) as event_name
+      FROM warp_configs wc
+      LEFT JOIN devices d ON d.hwid = wc.hwid
+      ORDER BY wc.created_at DESC
+    `).all();
+    return c.json(results);
+  } catch (err: any) {
+    if (err.message && err.message.includes("no such table")) {
+      try {
+        await c.env.DB.batch([
+          c.env.DB.prepare(`CREATE TABLE IF NOT EXISTS warp_configs (
+            hwid TEXT PRIMARY KEY, config_id TEXT, private_key TEXT, public_key TEXT,
+            endpoint TEXT, address_v4 TEXT, address_v6 TEXT, reserved TEXT,
+            mtu INTEGER DEFAULT 1280, remark TEXT, warp_uri TEXT NOT NULL,
+            auto_mode INTEGER DEFAULT 0, status TEXT DEFAULT 'active',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (hwid) REFERENCES devices(hwid) ON DELETE CASCADE
+          )`),
+          c.env.DB.prepare(`CREATE TABLE IF NOT EXISTS warp_settings (
+            id INTEGER PRIMARY KEY CHECK(id = 1), auto_connect INTEGER DEFAULT 0,
+            endpoint TEXT, remark TEXT
+          )`),
+          c.env.DB.prepare("INSERT OR IGNORE INTO warp_settings (id, auto_connect, endpoint, remark) VALUES (1, 0, '', '')"),
+        ]);
+        const { results } = await c.env.DB.prepare(`
+          SELECT wc.*, d.device_info_os, d.user_type,
+                 (SELECT name FROM events WHERE events.id = d.current_event_id) as event_name
+          FROM warp_configs wc
+          LEFT JOIN devices d ON d.hwid = wc.hwid
+          ORDER BY wc.created_at DESC
+        `).all();
+        return c.json(results);
+      } catch (alterErr: any) {
+        return c.json({ error: `Failed to create warp tables: ${alterErr.message}` }, 500);
+      }
+    }
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// Get warp settings
+app.get("/api/dev/warp/settings", async (c) => {
+  try {
+    const row = await c.env.DB.prepare("SELECT * FROM warp_settings WHERE id = 1").first();
+    return c.json(row || { id: 1, auto_connect: 0, endpoint: "", remark: "" });
+  } catch (err: any) {
+    if (err.message && err.message.includes("no such table")) {
+      try {
+        await c.env.DB.batch([
+          c.env.DB.prepare(`CREATE TABLE IF NOT EXISTS warp_settings (
+            id INTEGER PRIMARY KEY CHECK(id = 1), auto_connect INTEGER DEFAULT 0,
+            endpoint TEXT, remark TEXT
+          )`),
+          c.env.DB.prepare("INSERT OR IGNORE INTO warp_settings (id, auto_connect, endpoint, remark) VALUES (1, 0, '', '')"),
+        ]);
+        const row = await c.env.DB.prepare("SELECT * FROM warp_settings WHERE id = 1").first();
+        return c.json(row || { id: 1, auto_connect: 0, endpoint: "", remark: "" });
+      } catch (alterErr: any) {
+        return c.json({ error: `Failed to create warp_settings: ${alterErr.message}` }, 500);
+      }
+    }
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// Update warp settings
+app.put("/api/dev/warp/settings", async (c) => {
+  const { auto_connect, endpoint, remark } = await c.req.json();
+  try {
+    const { success } = await c.env.DB.prepare(
+      "UPDATE warp_settings SET auto_connect = ?, endpoint = ?, remark = ? WHERE id = 1"
+    ).bind(auto_connect ? 1 : 0, endpoint || "", remark || "").run();
+    if (!success) return c.json({ error: "Failed to update settings" }, 500);
+
+    let propagated = 0;
+    try {
+      const { results: configs } = await c.env.DB.prepare(
+        "SELECT hwid, private_key, public_key, address_v4, address_v6, reserved, mtu FROM warp_configs"
+      ).all();
+      if (configs && configs.length > 0) {
+        const updates = configs.map((w: any) => {
+          const uri = buildWarpUri({
+            private_key: w.private_key || "", public_key: w.public_key || "",
+            endpoint: endpoint || "", address_v4: w.address_v4 || "",
+            address_v6: w.address_v6 || "", reserved: w.reserved || "",
+            mtu: w.mtu || 1280, remark: remark || ""
+          });
+          return c.env.DB.prepare(
+            "UPDATE warp_configs SET endpoint = ?, remark = ?, warp_uri = ?, updated_at = CURRENT_TIMESTAMP WHERE hwid = ?"
+          ).bind(endpoint || "", remark || "", uri, w.hwid);
+        });
+        await c.env.DB.batch(updates);
+        propagated = configs.length;
+      }
+    } catch (propErr) {
+      console.error("WARP settings propagation failed (non-fatal):", propErr);
+    }
+
+    return c.json({ message: "Settings updated", propagated });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// Generate warp config for a device
+app.post("/api/dev/warp/generate", async (c) => {
+  const { hwid } = await c.req.json();
+  if (!hwid) return c.json({ error: "Missing hwid" }, 400);
+
+  const device = await c.env.DB.prepare("SELECT hwid FROM devices WHERE hwid = ?").bind(hwid).first();
+  if (!device) return c.json({ error: "Device not found" }, 404);
+
+  let settings: any = { endpoint: "", remark: "" };
+  try {
+    settings = await c.env.DB.prepare("SELECT * FROM warp_settings WHERE id = 1").first() || settings;
+  } catch {}
+
+  try {
+    const warpData = await callVercelWarp(c.env, settings.endpoint || undefined, settings.remark || undefined);
+    if (!warpData || !warpData.uri) {
+      return c.json({ error: "Vercel WARP returned invalid data: " + JSON.stringify(warpData) }, 500);
+    }
+
+    const { success } = await c.env.DB.prepare(
+      `INSERT OR REPLACE INTO warp_configs (hwid, config_id, private_key, public_key, endpoint, address_v4, address_v6, reserved, mtu, remark, warp_uri, status, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP)`
+    ).bind(
+      hwid,
+      warpData.config_id ?? "",
+      warpData.private_key ?? "",
+      warpData.public_key ?? "",
+      warpData.endpoint ?? "",
+      warpData.address_v4 ?? "",
+      warpData.address_v6 ?? "",
+      warpData.reserved ?? "",
+      warpData.mtu ?? 1280,
+      warpData.remark ?? "",
+      warpData.uri
+    ).run();
+
+    if (success) return c.json({ message: "WARP config generated", uri: warpData.uri }, 201);
+    return c.json({ error: "Failed to save WARP config" }, 500);
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// Regenerate warp config for a device
+app.post("/api/dev/warp/regenerate/:hwid", async (c) => {
+  const hwid = c.req.param("hwid");
+
+  let settings: any = { endpoint: "", remark: "" };
+  try {
+    settings = await c.env.DB.prepare("SELECT * FROM warp_settings WHERE id = 1").first() || settings;
+  } catch {}
+
+  try {
+    const warpData = await callVercelWarp(c.env, settings.endpoint || undefined, settings.remark || undefined);
+    if (!warpData || !warpData.uri) {
+      return c.json({ error: "Vercel WARP returned invalid data: " + JSON.stringify(warpData) }, 500);
+    }
+
+    const { success } = await c.env.DB.prepare(
+      `INSERT OR REPLACE INTO warp_configs (hwid, config_id, private_key, public_key, endpoint, address_v4, address_v6, reserved, mtu, remark, warp_uri, status, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP)`
+    ).bind(
+      hwid,
+      warpData.config_id ?? "",
+      warpData.private_key ?? "",
+      warpData.public_key ?? "",
+      warpData.endpoint ?? "",
+      warpData.address_v4 ?? "",
+      warpData.address_v6 ?? "",
+      warpData.reserved ?? "",
+      warpData.mtu ?? 1280,
+      warpData.remark ?? "",
+      warpData.uri
+    ).run();
+
+    if (success) return c.json({ message: "WARP config regenerated", uri: warpData.uri });
+    return c.json({ error: "Failed to regenerate WARP config" }, 500);
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// Toggle per-device auto_mode
+app.patch("/api/dev/warp/:hwid", async (c) => {
+  const hwid = c.req.param("hwid");
+  const { auto_mode } = await c.req.json();
+  const val = auto_mode ? 1 : 0;
+
+  const { success } = await c.env.DB.prepare(
+    "UPDATE warp_configs SET auto_mode = ? WHERE hwid = ?"
+  ).bind(val, hwid).run();
+
+  if (success) return c.json({ message: "Auto mode updated" });
+  return c.json({ error: "Failed to update auto mode" }, 500);
+});
+
+// Edit warp config
+app.put("/api/dev/warp/:hwid", async (c) => {
+  const hwid = c.req.param("hwid");
+  const body = await c.req.json();
+
+  const existing = await c.env.DB.prepare("SELECT * FROM warp_configs WHERE hwid = ?").bind(hwid).first<any>();
+  if (!existing) return c.json({ error: "WARP config not found" }, 404);
+
+  const merged = {
+    private_key: body.private_key ?? existing.private_key,
+    public_key: body.public_key ?? existing.public_key,
+    endpoint: body.endpoint ?? existing.endpoint,
+    address_v4: body.address_v4 ?? existing.address_v4,
+    address_v6: body.address_v6 ?? existing.address_v6,
+    reserved: body.reserved ?? existing.reserved,
+    mtu: Number(body.mtu) || existing.mtu || 1280,
+    remark: body.remark ?? existing.remark,
+    status: body.status ?? existing.status,
+  };
+
+  const warpUri = buildWarpUri(merged);
+
+  const { success } = await c.env.DB.prepare(
+    "UPDATE warp_configs SET private_key = ?, public_key = ?, endpoint = ?, address_v4 = ?, address_v6 = ?, reserved = ?, mtu = ?, remark = ?, status = ?, warp_uri = ?, updated_at = CURRENT_TIMESTAMP WHERE hwid = ?"
+  ).bind(
+    merged.private_key, merged.public_key, merged.endpoint,
+    merged.address_v4, merged.address_v6, merged.reserved,
+    merged.mtu, merged.remark, merged.status, warpUri, hwid
+  ).run();
+
+  if (success) return c.json({ message: "WARP config updated", uri: warpUri });
+  return c.json({ error: "Failed to update WARP config" }, 500);
+});
+
+// Delete warp config
+app.delete("/api/dev/warp/:hwid", async (c) => {
+  const hwid = c.req.param("hwid");
+  const { success } = await c.env.DB.prepare("DELETE FROM warp_configs WHERE hwid = ?").bind(hwid).run();
+
+  if (success) return c.json({ message: "WARP config deleted" });
+  return c.json({ error: "Failed to delete WARP config" }, 500);
+});
+
+
+// ==========================================
 // EXTERNAL API (Third-Party Integration)
 // ==========================================
 
@@ -729,9 +1027,15 @@ app.get("/sub/:uuid", async (c) => {
     }
   }
 
-  // Reg/Free/Promo devices cannot join paid events
-  if (device && payload.user_type === 'paid' && (device.user_type === 'reg' || device.user_type === 'free' || device.user_type === 'promo')) {
-    return await rejectResp("wrong_hwid", payload.event_id);
+  // Cross-type blocking: device type must match event type.
+  // Reg devices can only join free events; paid/free/promo must match exactly.
+  if (device) {
+    if (device.user_type === 'reg' && payload.user_type !== 'free') {
+      return await rejectResp("wrong_hwid", payload.event_id);
+    }
+    if (['free', 'paid', 'promo'].includes(device.user_type as string) && device.user_type !== payload.user_type) {
+      return await rejectResp("wrong_hwid", payload.event_id);
+    }
   }
 
   // Strict HWID validation — ONLY for pre-bound hwid events
@@ -788,6 +1092,37 @@ app.get("/sub/:uuid", async (c) => {
           }
 
           device = await c.env.DB.prepare("SELECT * FROM devices WHERE hwid = ?").bind(hwid).first();
+
+          // Auto-connect: generate WARP config for new device if global auto_connect is ON
+          try {
+            const warpSettings = await c.env.DB.prepare("SELECT auto_connect, endpoint, remark FROM warp_settings WHERE id = 1").first<{ auto_connect: number; endpoint: string; remark: string }>();
+            if (warpSettings && warpSettings.auto_connect === 1) {
+              const existingWarp = await c.env.DB.prepare("SELECT hwid FROM warp_configs WHERE hwid = ?").bind(hwid).first();
+              if (!existingWarp) {
+                const warpData = await callVercelWarp(c.env, warpSettings.endpoint || undefined, warpSettings.remark || undefined);
+                if (warpData && warpData.uri) {
+                  await c.env.DB.prepare(
+                    `INSERT OR REPLACE INTO warp_configs (hwid, config_id, private_key, public_key, endpoint, address_v4, address_v6, reserved, mtu, remark, warp_uri, auto_mode, status, updated_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'active', CURRENT_TIMESTAMP)`
+                  ).bind(
+                    hwid,
+                    warpData.config_id ?? "",
+                    warpData.private_key ?? "",
+                    warpData.public_key ?? "",
+                    warpData.endpoint ?? "",
+                    warpData.address_v4 ?? "",
+                    warpData.address_v6 ?? "",
+                    warpData.reserved ?? "",
+                    warpData.mtu ?? 1280,
+                    warpData.remark ?? "",
+                    warpData.uri
+                  ).run();
+                }
+              }
+            }
+          } catch (warpErr) {
+            console.error("WARP auto-connect failed (non-fatal):", warpErr);
+          }
         }
       }
     }
@@ -839,9 +1174,21 @@ app.get("/sub/:uuid", async (c) => {
 
   // Combine and encode configs
   let finalConfigStr = "";
+
   if (link.custom_parameters) {
     finalConfigStr += link.custom_parameters + "\n";
   }
+
+  // WARP wireguard URI
+  if (device) {
+    try {
+      const warpRow = await c.env.DB.prepare("SELECT warp_uri FROM warp_configs WHERE hwid = ? AND status = 'active'").bind(hwid).first<{ warp_uri: string }>();
+      if (warpRow && warpRow.warp_uri) {
+        finalConfigStr += warpRow.warp_uri + "\n";
+      }
+    } catch {}
+  }
+
   if (link.combined_configs) {
     finalConfigStr += link.combined_configs;
   }

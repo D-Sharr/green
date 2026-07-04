@@ -23,7 +23,7 @@
 			"binding": "DB",
 			"database_name": "green-db",
 			"database_id": "b6134838-d899-4cf5-956d-7c599b2c26fd",
-			"remote": true
+			"remote": false
 		}
 	]
 	/**

@@ -1,0 +1,14 @@
+{
+  "name": "green-warp-vercel",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@vercel/node": "^3.0.0",
+    "tweetnacl": "^1.0.3",
+    "vercel": "^54.20.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}
