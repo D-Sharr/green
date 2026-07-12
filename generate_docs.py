@@ -1,4 +1,8 @@
-# V-Panel API Documentation
+import re
+
+old_doc = open('API_DOCUMENTATION.md', 'r').read()
+
+new_doc = """# V-Panel API Documentation
 
 > **Base URL:** `https://v-panel.serverbyhtet.workers.dev`
 
@@ -280,8 +284,7 @@ Create a new link.
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "remark": "Main Link",
   "custom_parameters": "#profile-update-interval: 2",
-  "combined_configs": "vless://...#SG-01
-vless://...#JP-01"
+  "combined_configs": "vless://...#SG-01\nvless://...#JP-01"
 }
 ```
 
@@ -663,3 +666,7 @@ The system integrates with an external encryption service to generate `happ://` 
 | auto_connect | INTEGER | Auto-generate WARP for new devices (0/1) |
 | endpoint     | TEXT    | Default endpoint for new configs         |
 | remark       | TEXT    | Default remark for new configs           |
+"""
+
+open('API_DOCUMENTATION.md', 'w').write(new_doc)
+print("Updated API_DOCUMENTATION.md")
