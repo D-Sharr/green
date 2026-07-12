@@ -1693,6 +1693,7 @@ export const adminHtmlTemplate = `
                         </td>
                         <td class="px-6 py-4 text-xs" data-label="Limit">\${ev.allowed_user === 0 ? 'Unl.' : ev.allowed_user}</td>
                         <td class="px-6 py-4 text-right" data-label="">
+                            <button onclick="copyEventId('\${ev.id}')" class="text-slate-400 hover:text-brand p-2 rounded-lg transition-colors" title="Copy Event ID (for reseller bot config)"><i class="fa-solid fa-fingerprint"></i></button>
                             <button onclick="editEvent('\${ev.id}')" class="text-indigo-400 hover:text-indigo-300 p-2 rounded-lg"><i class="fa-solid fa-pen"></i></button>
                             <button onclick="deleteEvent('\${ev.id}')" class="text-rose-400 hover:text-rose-300 p-2 rounded-lg"><i class="fa-solid fa-trash"></i></button>
                         </td>
@@ -1712,6 +1713,10 @@ export const adminHtmlTemplate = `
             }
             const url = \`\${base}/sub/\${linkId}?event_code=\${eventCode}\`;
             navigator.clipboard.writeText(url).then(() => showToast('Event URL Copied!'));
+        }
+
+        function copyEventId(id) {
+            navigator.clipboard.writeText(id).then(() => showToast('Event ID Copied!'));
         }
 
         async function openCreateEventModal() {

@@ -17,9 +17,10 @@
 9. [Admin API — Announcements](#admin-api--announcements)
 10. [Admin API — WARP](#admin-api--warp)
 11. [External API — Devices](#external-api--devices)
-12. [External Integration — Happ Crypto API](#external-integration--happ-crypto-api)
-13. [Announcement Keys Reference](#announcement-keys-reference)
-14. [Database Schema](#database-schema)
+12. [Reseller API — Device Upgrade](#reseller-api--device-upgrade)
+13. [External Integration — Happ Crypto API](#external-integration--happ-crypto-api)
+14. [Announcement Keys Reference](#announcement-keys-reference)
+15. [Database Schema](#database-schema)
 
 ---
 
@@ -538,6 +539,92 @@ Write-only endpoint to pre-register a device with no event assigned. This behave
     "event_id": null
   }
 }
+```
+
+---
+
+## Reseller API — Device Upgrade
+
+Endpoints for third-party bots to provision and upgrade devices to paid events. Uses `EXTERNAL_API_TOKEN` for `Bearer` authentication.
+
+### `POST /api/reseller/devices/:hardware_id/upgrade`
+
+Provisions or upgrades a device by assigning it to a paid event identified by `event_id`. This is a **1-step upsert process** — no pre-registration is required. If the device does not exist, it is automatically created. If it already exists, its subscription is extended.
+
+**Authentication:**
+
+| Header          | Value                           |
+|-----------------|---------------------------------|
+| `Authorization` | `Bearer <EXTERNAL_API_TOKEN>`   |
+
+**URL Parameters:**
+
+| Parameter     | Type   | Required | Description                    |
+|---------------|--------|----------|--------------------------------|
+| `hardware_id` | string | ✅       | The hardware ID of the device  |
+
+**Request Body:**
+
+```json
+{
+  "event_id": "550e8400-e29b-41d4-a716-446655440000",
+  "days": 30
+}
+```
+
+| Field      | Type    | Required | Description                          |
+|------------|---------|----------|--------------------------------------|
+| `event_id` | string  | ✅       | UUID of the paid event to assign     |
+| `days`     | integer | ✅       | Number of days to add to the subscription. **Only accepts `30` or `90`.** |
+
+**Expiration Stacking Logic:**
+
+| Device State                          | Expiry Calculation                        |
+|---------------------------------------|-------------------------------------------|
+| New device                            | `now + days`                              |
+| Existing, expired                     | `now + days`                              |
+| Existing, active + **same event**     | `current_expire_date + days` (stacks)     |
+| Existing, active + **different event**| `now + days` (resets)                     |
+
+**Success Response:** `200 OK`
+
+```json
+{
+  "message": "Device upgraded successfully",
+  "created": false,
+  "device": {
+    "hardware_id": "abc123def456",
+    "event_id": "550e8400-e29b-41d4-a716-446655440000",
+    "user_type": "paid",
+    "expire_date": "2026-08-12T00:00:00Z"
+  }
+}
+```
+
+| Field     | Type    | Description                                      |
+|-----------|---------|--------------------------------------------------|
+| `created` | boolean | `true` if the device was newly created, `false` if it was updated |
+
+> `user_type` is always set to `"paid"` regardless of the device's previous state.
+
+**Error Responses:**
+
+| Status | Condition                                      | Response Body                              |
+|--------|------------------------------------------------|--------------------------------------------|
+| `400`  | `event_id` or `days` is missing, `days` is not `30` or `90`, or request body is invalid JSON | `{ "error": "..." }`     |
+| `401`  | Token is missing or incorrect                  | `{ "error": "Unauthorized" }`              |
+| `404`  | Event with the given `event_id` does not exist | `{ "error": "Event not found" }`           |
+| `503`  | `EXTERNAL_API_TOKEN` is not configured on the server | `{ "error": "..." }`                  |
+
+**Provisioning Workflow:**
+
+A third-party bot calls this single endpoint to provision a user. The server handles device creation and event assignment atomically:
+
+```bash
+curl -X POST "https://v-panel.serverbyhtet.workers.dev/api/reseller/devices/device-hwid-001/upgrade" \
+  -H "Authorization: Bearer YOUR_EXTERNAL_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"event_id": "550e8400-e29b-41d4-a716-446655440000", "days": 30}'
 ```
 
 ---

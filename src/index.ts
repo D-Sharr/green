@@ -820,6 +820,23 @@ app.use("/api/external/*", async (c, next) => {
   await next();
 });
 
+// Dedicated authentication middleware for reseller API — uses EXTERNAL_API_TOKEN only, never ADMIN_TOKEN
+app.use("/api/reseller/*", async (c, next) => {
+  const authHeader = c.req.header("Authorization") || "";
+  const token = c.env.EXTERNAL_API_TOKEN;
+
+  if (!token) {
+    return c.json({ error: "Reseller API is not configured" }, 503);
+  }
+
+  const expected = `Bearer ${token}`;
+  if (authHeader !== expected) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  await next();
+});
+
 /**
  * GET /api/external/devices/:hardware_id
  * Read-only: returns device status plus linked event info.
@@ -934,6 +951,98 @@ app.post("/api/external/devices/pre-register", async (c) => {
       event_id:    null,
     },
   }, 201);
+});
+
+/**
+ * POST /api/reseller/devices/:hardware_id/upgrade
+ * Upserts a device into a target event with a custom number of days.
+ * Body: { "event_id": string, "days": number }
+ */
+app.post("/api/reseller/devices/:hardware_id/upgrade", async (c) => {
+  const hardware_id = c.req.param("hardware_id");
+
+  let body: { event_id?: string; days?: number };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+
+  const { event_id, days } = body;
+
+  if (!event_id || typeof event_id !== "string" || event_id.trim() === "") {
+    return c.json({ error: "Missing or invalid field: event_id" }, 400);
+  }
+
+  if (typeof days !== "number" || !Number.isFinite(days) || (days !== 30 && days !== 90)) {
+    return c.json({ error: "Invalid field: days (must be exactly 30 or 90)" }, 400);
+  }
+
+  const event = await c.env.DB.prepare(
+    "SELECT id, link_id, user_type FROM events WHERE id = ?"
+  ).bind(event_id.trim()).first<{ id: string; link_id: string; user_type: string }>();
+
+  if (!event) {
+    return c.json({ error: "Event not found" }, 404);
+  }
+
+  const device = await c.env.DB.prepare(
+    "SELECT hwid, expire_date, current_event_id FROM devices WHERE hwid = ?"
+  ).bind(hardware_id).first<{ hwid: string; expire_date: string | null; current_event_id: string | null }>();
+
+  const now = new Date();
+  let baseDate = now;
+
+  if (device && device.expire_date) {
+    let currentExpire = new Date(device.expire_date);
+    if (
+      isNaN(currentExpire.getTime()) &&
+      !device.expire_date.includes('Z') &&
+      !device.expire_date.includes('+')
+    ) {
+      currentExpire = new Date(device.expire_date + '+06:30');
+    }
+    if (currentExpire > now && device.current_event_id === event.id) {
+      baseDate = currentExpire;
+    }
+  }
+
+  const newExpire = new Date(baseDate);
+  newExpire.setDate(newExpire.getDate() + days);
+  const expireStr = newExpire.toISOString();
+
+  let created = false;
+
+  if (!device) {
+    const { success } = await c.env.DB.prepare(
+      "INSERT INTO devices (hwid, device_info_os, event_id, current_event_id, link_id, expire_date, user_type) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    ).bind(hardware_id, null, event.id, event.id, event.link_id, expireStr, 'paid').run();
+
+    if (!success) {
+      return c.json({ error: "Failed to upgrade device" }, 500);
+    }
+
+    created = true;
+  } else {
+    const { success } = await c.env.DB.prepare(
+      "UPDATE devices SET event_id = ?, current_event_id = ?, link_id = ?, expire_date = ?, user_type = 'paid' WHERE hwid = ?"
+    ).bind(event.id, event.id, event.link_id, expireStr, hardware_id).run();
+
+    if (!success) {
+      return c.json({ error: "Failed to upgrade device" }, 500);
+    }
+  }
+
+  return c.json({
+    message: "Device upgraded successfully",
+    created,
+    device: {
+      hardware_id,
+      event_id: event.id,
+      user_type: 'paid',
+      expire_date: expireStr,
+    },
+  });
 });
 
 // ==========================================

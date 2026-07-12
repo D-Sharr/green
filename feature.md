@@ -233,13 +233,25 @@ Separate Bearer auth (`EXTERNAL_API_TOKEN`), isolated from admin token. Returns 
 - `GET /api/external/devices/:hardware_id` — read-only device status with joined event info; computes `is_active` from `expire_date` (MMT); maps fields (`hardware_id`↔`hwid`, `os_platform`↔`device_info_os`).
 - `POST /api/external/devices/pre-register` — race-safe pre-register via `INSERT OR IGNORE`; returns existing device if already present.
 
-### 7. Happ Crypto Integration
+### 7. Reseller API (`/api/reseller/*`)
+Third-party bot provisioning endpoint that creates or upgrades devices to paid events in a **single step** (upsert). Reuses `EXTERNAL_API_TOKEN` for Bearer authentication.
+
+- `POST /api/reseller/devices/:hardware_id/upgrade` — provisions or upgrades a device by assigning it to a paid event; requires `{ "event_id": "<uuid>", "days": <30|90> }` in the request body (`days` only accepts `30` or `90`); returns `200` with device details and a `created` boolean (`true` = newly created, `false` = updated) on success; `user_type` is always set to `"paid"`; `400`/`401`/`404`/`503` on error.
+- **1-step upsert flow:** no pre-registration needed. If the device does not exist, it is created automatically.
+- **Smart expiration stacking:**
+  - New device → `now + days`
+  - Existing, expired → `now + days`
+  - Existing, active + **same event** → `current_expire_date + days` (stacks)
+  - Existing, active + **different event** → `now + days` (resets)
+- **Admin UI addition:** "Copy Event ID" button (fingerprint icon) added to the Events table so admins can easily copy an event's UUID for bot configuration.
+
+### 8. Happ Crypto Integration
 - `POST https://crypto.happ.su/api-v2.php` with `{ url }` → `{ encrypted_link }`.
 - Triggered on event create (`POST /events`) and update (`PUT /events/:id`).
 - Wraps the worker's own `/sub/:uuid?event_code=...` URL into a `happ://crypt5/...` link stored as `events.happ_link`.
 - Non-fatal: event creation succeeds even if Happ fails (`happ_link` saved as null, errors logged).
 
-### 8. Camouflage Pages
+### 9. Camouflage Pages
 - **`landing-ui.ts` (`GET /`)** — fake "SkyWatch Pro" weather app (dark night-sky theme, 100 twinkling stars, shooting stars, hardcoded weather). No VPN logic; pure decoy front door.
 - **`postcard-ui.ts` (`GET /sub/:uuid` browser branch)** — "Happy Chinese New Year" greeting card (red/gold, lanterns, dragon, sparkles) shown to humans who open a subscription link in a browser instead of returning raw config.
 
@@ -284,6 +296,12 @@ Separate Bearer auth (`EXTERNAL_API_TOKEN`), isolated from admin token. Returns 
 |---|---|---|
 | GET | `/api/external/devices/:hardware_id` | Device status (read-only, MMT-aware `is_active`) |
 | POST | `/api/external/devices/pre-register` | Race-safe pre-register |
+
+### Reseller API — `/api/reseller/*` (Bearer `EXTERNAL_API_TOKEN`)
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/reseller/devices/:hardware_id/upgrade` | Upsert device to paid event (1-step, requires `days`) |
 
 ### Public
 
