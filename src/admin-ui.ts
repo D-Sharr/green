@@ -303,7 +303,7 @@ export const adminHtmlTemplate = `
                     <div class="flex items-center gap-3 w-full sm:w-auto">
                         <div class="relative flex-1 sm:w-64">
                             <i class="fa-solid fa-search absolute left-3 top-1/2 transform -translate-y-1/2 text-slate-400"></i>
-                            <input type="text" id="searchDeviceInput" oninput="filterDevices()" placeholder="Search by HWID..." class="w-full bg-slate-800 border border-slate-700 rounded-lg pl-10 pr-4 py-2 text-sm text-white focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand">
+                            <input type="text" id="searchDeviceInput" oninput="debouncedFilterDevices()" placeholder="Search by HWID..." class="w-full bg-slate-800 border border-slate-700 rounded-lg pl-10 pr-4 py-2 text-sm text-white focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand">
                         </div>
                         <button onclick="openAddDeviceModal()" class="bg-indigo-500 hover:bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-lg shadow-indigo-500/20 shrink-0">
                             <i class="fa-solid fa-plus mr-2"></i>Add Device
@@ -340,7 +340,7 @@ export const adminHtmlTemplate = `
                             <tr>
                                 <th class="px-6 py-4 font-medium">HWID</th>
                                 <th class="px-6 py-4 font-medium">Event</th>
-                                <th class="px-6 py-4 font-medium hidden md:table-cell">OS Info</th>
+                                <th class="px-6 py-4 font-medium">OS Info</th>
                                 <th class="px-6 py-4 font-medium">Type</th>
                                 <th class="px-6 py-4 font-medium hidden md:table-cell">First Seen</th>
                                 <th class="px-6 py-4 font-medium">Expiry</th>
@@ -352,6 +352,20 @@ export const adminHtmlTemplate = `
                         </tbody>
                     </table>
                 </div>
+                
+                <!-- Pagination Controls -->
+                <div id="devicesPagination" class="flex items-center justify-between px-2 py-3 hidden">
+                    <div class="text-sm text-slate-400" id="devicesPageInfo">Page 1 of 1</div>
+                    <div class="flex items-center gap-2">
+                        <button id="devicesPrevBtn" onclick="goToDevicesPage(deviceCurrentPage - 1)" class="px-3 py-1.5 text-sm bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                            <i class="fa-solid fa-chevron-left mr-1"></i>Previous
+                        </button>
+                        <button id="devicesNextBtn" onclick="goToDevicesPage(deviceCurrentPage + 1)" class="px-3 py-1.5 text-sm bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                            Next<i class="fa-solid fa-chevron-right ml-1"></i>
+                        </button>
+                    </div>
+                </div>
+
             </div>
 
             <!-- Events View -->
@@ -1434,6 +1448,46 @@ export const adminHtmlTemplate = `
 
         // --- Devices Logic ---
         let globalDevices = [];
+        
+        // --- Device Pagination & Debounce State ---
+        let deviceCurrentPage = 1;
+        const DEVICES_PER_PAGE = 50;
+        let filteredDeviceCache = [];
+        let _filterDebounceTimer = null;
+
+        function debouncedFilterDevices() {
+            clearTimeout(_filterDebounceTimer);
+            _filterDebounceTimer = setTimeout(() => {
+                deviceCurrentPage = 1;
+                filterDevices();
+            }, 250);
+        }
+
+        function goToDevicesPage(page) {
+            const totalPages = Math.max(1, Math.ceil(filteredDeviceCache.length / DEVICES_PER_PAGE));
+            deviceCurrentPage = Math.max(1, Math.min(page, totalPages));
+            renderDevices(filteredDeviceCache);
+        }
+
+        function updateDevicesPagination(totalItems) {
+            const totalPages = Math.max(1, Math.ceil(totalItems / DEVICES_PER_PAGE));
+            const pageInfo = document.getElementById('devicesPageInfo');
+            const prevBtn = document.getElementById('devicesPrevBtn');
+            const nextBtn = document.getElementById('devicesNextBtn');
+            const paginationEl = document.getElementById('devicesPagination');
+
+            if (!pageInfo || !prevBtn || !nextBtn || !paginationEl) return;
+
+            if (totalItems === 0) {
+                paginationEl.classList.add('hidden');
+                return;
+            }
+            paginationEl.classList.remove('hidden');
+
+            pageInfo.textContent = \`Page \${deviceCurrentPage} of \${totalPages}\`;
+            prevBtn.disabled = deviceCurrentPage <= 1;
+            nextBtn.disabled = deviceCurrentPage >= totalPages;
+        }
 
         async function loadDevices() {
             renderTableState('devicesTableBody', 7, 'loading');
@@ -1470,7 +1524,7 @@ export const adminHtmlTemplate = `
             const osFilter = document.getElementById('filterDeviceOs').value;
             const eventFilter = document.getElementById('filterDeviceEvent').value;
 
-            const filtered = globalDevices.filter(d => {
+            filteredDeviceCache = globalDevices.filter(d => {
                 if (query && !(d.hwid || '').toLowerCase().includes(query)) return false;
                 if (typeFilter !== 'all' && d.user_type !== typeFilter) return false;
                 if (osFilter !== 'all') {
@@ -1490,7 +1544,7 @@ export const adminHtmlTemplate = `
                 }
                 return true;
             });
-            renderDevices(filtered, query);
+            renderDevices(filteredDeviceCache, query);
         }
 
         function renderDevices(devices, searchQuery = '') {
@@ -1500,10 +1554,26 @@ export const adminHtmlTemplate = `
             if (devices.length === 0) {
                  const msg = searchQuery ? 'No devices match your search.' : 'No devices found.';
                  tbody.innerHTML = \`<tr><td colspan="7" class="px-6 py-12 text-center text-slate-500"><i class="fa-regular fa-folder-open text-3xl mb-3 block opacity-50"></i>\${msg}</td></tr>\`;
+                 updateDevicesPagination(0);
                  return;
             }
 
-            devices.forEach(d => {
+            // Pagination slice
+            const totalPages = Math.max(1, Math.ceil(devices.length / DEVICES_PER_PAGE));
+            if (deviceCurrentPage > totalPages) deviceCurrentPage = totalPages;
+            const startIdx = (deviceCurrentPage - 1) * DEVICES_PER_PAGE;
+            const pageDevices = devices.slice(startIdx, startIdx + DEVICES_PER_PAGE);
+
+            function osIcon(os) {
+                const osLower = (os || '').toLowerCase();
+                if (osLower.includes('android')) return '🤖';
+                if (osLower.includes('ios') || osLower.includes('iphone')) return '🍎';
+                if (osLower.includes('mac')) return '💻';
+                if (osLower.includes('windows') || osLower.includes('win')) return '🪟';
+                return '❓';
+            }
+
+            pageDevices.forEach(d => {
                 const expireText = d.expire_date ? new Date(d.expire_date).toLocaleDateString() : 'Never';
                 const isExpired = d.expire_date && new Date() > new Date(d.expire_date);
                 
@@ -1512,11 +1582,12 @@ export const adminHtmlTemplate = `
                 const hasWarp = globalWarpConfigs.some(w => w.hwid === d.hwid);
                 const warpClass = hasWarp ? 'text-emerald-400 hover:text-emerald-300' : 'text-slate-500 hover:text-brand';
                 const warpTitle = hasWarp ? 'WARP Connected (click to regenerate)' : 'WARP Connect';
+                const osLabel = d.device_info_os || 'Unknown';
                 
                 const row = \`<tr class="hover:bg-slate-800/30 transition-colors">
                     <td class="px-6 py-4 font-mono text-xs text-slate-400" data-label="HWID">\${d.hwid}</td>
                     <td class="px-6 py-4 text-xs text-brand" data-label="Event">\${eventName}</td>
-                    <td class="px-6 py-4 text-xs max-w-[150px] truncate hidden md:table-cell" data-label="OS">\${d.device_info_os || 'Unknown'}</td>
+                    <td class="px-6 py-4 text-xs" data-label="OS"><span class="mr-1.5">\${osIcon(osLabel)}</span>\${osLabel}</td>
                     <td class="px-6 py-4 uppercase text-xs font-semibold" data-label="Type">\${d.user_type} \${d.has_used_promo ? '<i class="fa-solid fa-gift text-brand ml-1" title="Used Promo"></i>' : ''}</td>
                     <td class="px-6 py-4 text-xs text-slate-400 hidden md:table-cell" data-label="First Seen">\${new Date(d.first_date).toLocaleDateString()}</td>
                     <td class="px-6 py-4 text-xs \${isExpired ? 'text-rose-400' : 'text-emerald-400'}" data-label="Expiry">\${expireText}</td>
@@ -1528,6 +1599,7 @@ export const adminHtmlTemplate = `
                 </tr>\`;
                 tbody.innerHTML += row;
             });
+            updateDevicesPagination(devices.length);
         }
 
         async function editDevice(hwid) {
@@ -1693,6 +1765,7 @@ export const adminHtmlTemplate = `
                         </td>
                         <td class="px-6 py-4 text-xs" data-label="Limit">\${ev.allowed_user === 0 ? 'Unl.' : ev.allowed_user}</td>
                         <td class="px-6 py-4 text-right" data-label="">
+                            <button onclick="copyEventUrl('\${ev.link_id}', '\${ev.event_code}')" class="text-slate-400 hover:text-brand p-2 rounded-lg transition-colors" title="Copy Event Subscription URL"><i class="fa-solid fa-link"></i></button>
                             <button onclick="copyEventId('\${ev.id}')" class="text-slate-400 hover:text-brand p-2 rounded-lg transition-colors" title="Copy Event ID (for reseller bot config)"><i class="fa-solid fa-fingerprint"></i></button>
                             <button onclick="editEvent('\${ev.id}')" class="text-indigo-400 hover:text-indigo-300 p-2 rounded-lg"><i class="fa-solid fa-pen"></i></button>
                             <button onclick="deleteEvent('\${ev.id}')" class="text-rose-400 hover:text-rose-300 p-2 rounded-lg"><i class="fa-solid fa-trash"></i></button>
